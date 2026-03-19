@@ -41,9 +41,11 @@
 #include "httpfs.hpp"
 #include "s3fs.hpp"
 #include "hffs.hpp"
+#ifdef ENABLE_AZURE
 #include "azure_blob_filesystem.hpp"
 #include "azure_dfs_filesystem.hpp"
 #include "azure_extension.hpp"
+#endif
 #include "postgres_scanner_extension.hpp"
 
 #include "duckdb_pglake_extension.hpp"
@@ -362,6 +364,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 		)
 	);
 
+#ifdef ENABLE_AZURE
 	fs.UnregisterSubSystem("AzureBlobStorageFileSystem");
 	fs.RegisterSubSystem(
 		make_uniq<PGLakeCachingFileSystem>(
@@ -375,6 +378,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 			make_uniq<AzureDfsStorageFileSystem>()
 		)
 	);
+#endif
 
 	fs.UnregisterSubSystem("HTTPFileSystem");
 	fs.RegisterSubSystem(

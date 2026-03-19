@@ -6,15 +6,19 @@ duckdb_extension_load(httpfs
     ADD_PATCHES
 )
 
-duckdb_extension_load(aws
-    GIT_URL https://github.com/duckdb/duckdb-aws
-    GIT_TAG bc15d211f282d1d78fc0d9fda3d09957ba776423
-)
+if(ENABLE_AWS_SDK)
+  duckdb_extension_load(aws
+      GIT_URL https://github.com/duckdb/duckdb-aws
+      GIT_TAG bc15d211f282d1d78fc0d9fda3d09957ba776423
+  )
+endif()
 
-duckdb_extension_load(azure
-    GIT_URL https://github.com/duckdb/duckdb-azure
-    GIT_TAG 7e1ac3333d946a6bf5b4552722743e03f30a47cd
-)
+if(ENABLE_AZURE)
+  duckdb_extension_load(azure
+      GIT_URL https://github.com/duckdb/duckdb-azure
+      GIT_TAG 7e1ac3333d946a6bf5b4552722743e03f30a47cd
+  )
+endif()
 
 # Extension from this repo
 duckdb_extension_load(duckdb_pglake

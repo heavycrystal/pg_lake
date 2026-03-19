@@ -22,8 +22,10 @@
 #include "pg_lake/fs/functions.hpp"
 #include "pg_lake/fs/region_aware_s3fs.hpp"
 
+#ifdef ENABLE_AZURE
 #include "azure_blob_filesystem.hpp"
 #include "azure_dfs_filesystem.hpp"
+#endif
 
 namespace duckdb {
 
@@ -468,26 +470,38 @@ static void ListFilesExec(ClientContext &context, TableFunctionInput &data_p, Da
 		 * than to implement singleton infrastructure just for this purpose.
 		 */
 		RegionAwareS3FileSystem s3fs(bufferManager);
-		AzureBlobStorageFileSystem abfs;
-		AzureDfsStorageFileSystem adfs;
+		bool handled = false;
 
 		if (s3fs.CanHandleFile(globPattern))
 		{
 			/* S3 URL, get details from the S3 file system */
 			functionData.files = s3fs.List(functionData.globPattern, false, opener);
 			functionData.hasDetails = true;
+			handled = true;
 		}
-		else if (abfs.CanHandleFile(globPattern))
+#ifdef ENABLE_AZURE
+		if (!handled)
 		{
-			functionData.files = abfs.Glob(functionData.globPattern, opener);
-			functionData.hasDetails = true;
+			AzureBlobStorageFileSystem abfs;
+			if (abfs.CanHandleFile(globPattern))
+			{
+				functionData.files = abfs.Glob(functionData.globPattern, opener);
+				functionData.hasDetails = true;
+				handled = true;
+			}
 		}
-		else if (adfs.CanHandleFile(globPattern))
+		if (!handled)
 		{
-			functionData.files = adfs.Glob(functionData.globPattern, opener);
-			functionData.hasDetails = true;
+			AzureDfsStorageFileSystem adfs;
+			if (adfs.CanHandleFile(globPattern))
+			{
+				functionData.files = adfs.Glob(functionData.globPattern, opener);
+				functionData.hasDetails = true;
+				handled = true;
+			}
 		}
-		else
+#endif
+		if (!handled)
 		{
 			/* other URL (e.g. HuggingFace), only include names for now */
 			FileSystem &fs = FileSystem::GetFileSystem(context);

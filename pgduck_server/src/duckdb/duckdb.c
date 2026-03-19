@@ -253,11 +253,15 @@ duckdb_global_init(char *databaseFilePath,
 	if (run_command_on_duckdb("LOAD icu") == DuckDBError)
 		return DUCKDB_INITIALIZATION_ERROR;
 
+#if PG_LAKE_AWS_SDK_SUPPORT == 1
 	if (run_command_on_duckdb("LOAD aws") == DuckDBError)
 		return DUCKDB_INITIALIZATION_ERROR;
+#endif
 
+#if PG_LAKE_AZURE_SUPPORT == 1
 	if (run_command_on_duckdb("LOAD azure") == DuckDBError)
 		return DUCKDB_INITIALIZATION_ERROR;
+#endif
 
 	/*
 	 * spatial is not a built-in module and does not work to be autoinstalled

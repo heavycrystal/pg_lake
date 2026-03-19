@@ -8,6 +8,9 @@ EXT_NAME=duckdb_pglake
 EXT_CONFIG=${PROJ_DIR}extension_config.cmake
 EXT_FLAGS=-DBUILD_EXTENSIONS="tpch;json;icu"
 
+ENABLE_AZURE ?= ON
+ENABLE_AWS_SDK ?= ON
+
 # GitHub actions uses a hash of the Makefile and source
 # files as a cache key. When we update the DuckDB version,
 # we should update the line below to trigger a new hash.
@@ -55,6 +58,9 @@ VCPKG_TOOLCHAIN_PATH?=
 ifneq ("${VCPKG_TOOLCHAIN_PATH}", "")
 	TOOLCHAIN_FLAGS:=${TOOLCHAIN_FLAGS} -DVCPKG_MANIFEST_DIR='${PROJ_DIR}' -DVCPKG_BUILD=1 -DCMAKE_TOOLCHAIN_FILE='${VCPKG_TOOLCHAIN_PATH}'
 endif
+
+#### Azure / AWS SDK config
+TOOLCHAIN_FLAGS:=${TOOLCHAIN_FLAGS} -DENABLE_AZURE=$(ENABLE_AZURE) -DENABLE_AWS_SDK=$(ENABLE_AWS_SDK)
 ifneq ("${VCPKG_TARGET_TRIPLET}", "")
 	TOOLCHAIN_FLAGS:=${TOOLCHAIN_FLAGS} -DVCPKG_TARGET_TRIPLET='${VCPKG_TARGET_TRIPLET}'
 endif

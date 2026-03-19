@@ -1,0 +1,12 @@
+{
+  "dependencies": [
+    "zlib",
+    "openssl",
+    "curl"
+  ],
+  "vcpkg-configuration": {
+    "overlay-ports": [
+      "./vcpkg_ports"
+    ]
+  }
+}
