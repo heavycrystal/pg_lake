@@ -68,6 +68,7 @@ WantedBy=multi-user.target
 EOF
 
 # postinst
+mkdir -p "${STAGING}/DEBIAN"
 cat > "${STAGING}/DEBIAN/postinst" <<'EOF'
 #!/bin/sh
 set -e

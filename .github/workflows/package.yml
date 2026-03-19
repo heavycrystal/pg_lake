@@ -59,9 +59,7 @@ jobs:
       - name: Cache DuckDB build
         uses: actions/cache@v5
         with:
-          path: |
-            duckdb_pglake/build
-            duckdb_pglake/libduckdb.so
+          path: duckdb_pglake/libduckdb.so
           key: duckdb-no-azure-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('duckdb_pglake/Makefile', 'duckdb_pglake/extension_config.cmake', 'duckdb_pglake/CMakeLists.txt', 'duckdb_pglake/src/**') }}
           restore-keys: |
             duckdb-no-azure-${{ runner.os }}-${{ runner.arch }}-
