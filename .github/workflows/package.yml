@@ -60,10 +60,14 @@ jobs:
         run: make duckdb_pglake ENABLE_AZURE=OFF ENABLE_AWS_SDK=OFF VCPKG_TOOLCHAIN_PATH=""
 
       - name: Upload libduckdb.so
-        uses: actions/upload-artifact@v6
+        run: |
+          cp duckdb_pglake/libduckdb.so libduckdb-stripped.so
+          strip libduckdb-stripped.so
+
+      - uses: actions/upload-artifact@v6
         with:
           name: libduckdb
-          path: duckdb_pglake/libduckdb.so
+          path: libduckdb-stripped.so
           retention-days: 1
 
       - name: Upload DuckDB headers
@@ -172,7 +176,7 @@ jobs:
         run: |
           PG_LIBDIR="$(pg_config --libdir)"
           PG_INCLUDEDIR="$(pg_config --includedir)"
-          sudo install /tmp/duckdb-artifact/libduckdb.so "${PG_LIBDIR}/libduckdb.so"
+          sudo install /tmp/duckdb-artifact/libduckdb-stripped.so "${PG_LIBDIR}/libduckdb.so"
           sudo install /tmp/duckdb-headers/duckdb.h "${PG_INCLUDEDIR}/"
           sudo install /tmp/duckdb-headers/duckdb.hpp "${PG_INCLUDEDIR}/"
           sudo install /tmp/duckdb-headers/duckdb_extension.h "${PG_INCLUDEDIR}/"
@@ -239,12 +243,9 @@ jobs:
           # DuckDB and avro shared libraries
           mkdir -p "${STAGING}${PG_LIBDIR}"
           cp "${PG_LIBDIR}/libduckdb.so" "${STAGING}${PG_LIBDIR}/"
-          strip "${STAGING}${PG_LIBDIR}/libduckdb.so"
-          AVRO_REAL=$(readlink -f "${PG_LIBDIR}/libavro.so")
-          AVRO_BASENAME=$(basename "${AVRO_REAL}")
-          cp "${AVRO_REAL}" "${STAGING}${PG_LIBDIR}/${AVRO_BASENAME}"
-          ln -sf "${AVRO_BASENAME}" "${STAGING}${PG_LIBDIR}/libavro.so.24"
-          ln -sf "${AVRO_BASENAME}" "${STAGING}${PG_LIBDIR}/libavro.so"
+          cp "${PG_LIBDIR}/libavro.so" "${STAGING}${PG_LIBDIR}/libavro.so.24.0.1"
+          ln -sf libavro.so.24.0.1 "${STAGING}${PG_LIBDIR}/libavro.so.24"
+          ln -sf libavro.so.24.0.1 "${STAGING}${PG_LIBDIR}/libavro.so"
 
           # Extension control and SQL files
           mkdir -p "${STAGING}${PG_SHAREDIR}/extension"
@@ -258,7 +259,9 @@ jobs:
           cp "${PG_BINDIR}/pgduck_server" "${STAGING}${PG_BINDIR}/"
 
           # Strip debug info from all binaries
-          find "${STAGING}" -name '*.so' -o -name '*.so.*' -o -name 'pgduck_server' | xargs strip
+          find "${STAGING}" \( -name '*.so' -o -name '*.so.*' -o -name 'pgduck_server' \) -type f -exec strip {} +
+          echo "Stripped sizes:"
+          find "${STAGING}" \( -name '*.so' -o -name '*.so.*' -o -name 'pgduck_server' \) -type f -exec ls -lh {} +
 
           # DEBIAN control
           mkdir -p "${STAGING}/DEBIAN"
