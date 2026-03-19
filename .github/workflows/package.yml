@@ -63,10 +63,16 @@ jobs:
             duckdb_pglake/build
             duckdb_pglake/libduckdb.so
           key: duckdb-no-azure-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('duckdb_pglake/Makefile', 'duckdb_pglake/extension_config.cmake', 'duckdb_pglake/CMakeLists.txt', 'duckdb_pglake/src/**') }}
+            restore-keys: |
+              duckdb-no-azure-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Build DuckDB (no Azure, no AWS SDK)
-        if: steps.duckdb-cache.outputs.cache-hit != 'true'
-        run: make duckdb_pglake ENABLE_AZURE=OFF ENABLE_AWS_SDK=OFF VCPKG_TOOLCHAIN_PATH=""
+        run: |
+          if [ -f duckdb_pglake/libduckdb.so ]; then
+            echo "Using cached libduckdb.so"
+          else
+            make duckdb_pglake ENABLE_AZURE=OFF ENABLE_AWS_SDK=OFF VCPKG_TOOLCHAIN_PATH=""
+          fi
 
       - name: Upload libduckdb.so
         run: |
