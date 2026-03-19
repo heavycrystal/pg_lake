@@ -1,0 +1,285 @@
+name: Package pg_lake_copy (no Azure)
+
+on:
+  workflow_dispatch:
+    inputs:
+      pg_version:
+        description: 'PostgreSQL major version (blank = all)'
+        required: false
+        default: ''
+        type: choice
+        options:
+          - ''
+          - '16'
+          - '17'
+          - '18'
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  # ── Build DuckDB once (PG-independent) ──────────────────────────
+  build-duckdb:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install PGDG repository
+        run: |
+          sudo apt-get install -y curl ca-certificates gnupg lsb-release
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | \
+            sudo gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] \
+            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | \
+            sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get install -y \
+            build-essential cmake ninja-build pkg-config \
+            postgresql-server-dev-17 \
+            libssl-dev libcurl4-openssl-dev libpq-dev
+          echo "/usr/lib/postgresql/17/bin" >> $GITHUB_PATH
+
+      - name: Cache DuckDB build
+        id: duckdb-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            duckdb_pglake/build
+            duckdb_pglake/libduckdb.so
+          key: duckdb-no-azure-${{ hashFiles('duckdb_pglake/Makefile', 'duckdb_pglake/extension_config.cmake', 'duckdb_pglake/CMakeLists.txt', 'duckdb_pglake/src/**') }}
+
+      - name: Build DuckDB (no Azure, no AWS SDK)
+        if: steps.duckdb-cache.outputs.cache-hit != 'true'
+        run: make duckdb_pglake ENABLE_AZURE=OFF ENABLE_AWS_SDK=OFF VCPKG_TOOLCHAIN_PATH=""
+
+      - name: Upload libduckdb.so
+        uses: actions/upload-artifact@v4
+        with:
+          name: libduckdb
+          path: duckdb_pglake/libduckdb.so
+          retention-days: 1
+
+      - name: Upload DuckDB headers
+        uses: actions/upload-artifact@v4
+        with:
+          name: duckdb-headers
+          path: |
+            duckdb_pglake/duckdb/src/include/duckdb.h
+            duckdb_pglake/duckdb/src/include/duckdb.hpp
+            duckdb_pglake/duckdb/src/include/duckdb_extension.h
+          retention-days: 1
+
+  # ── Build avro once (also PG-independent) ───────────────────────
+  build-avro:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get install -y \
+            build-essential cmake pkg-config \
+            libjansson-dev libsnappy-dev liblzma-dev liblz4-dev zlib1g-dev
+
+      - name: Build avro
+        run: |
+          make submodules
+          make avro
+
+      - name: Upload avro libs + headers
+        uses: actions/upload-artifact@v4
+        with:
+          name: avro
+          path: avro/lang/c/build/avrolib/
+          retention-days: 1
+
+  # ── Package per PG version ──────────────────────────────────────
+  package:
+    needs: [build-duckdb, build-avro]
+
+    strategy:
+      matrix:
+        pg_version: ${{ github.event_name == 'workflow_dispatch' && inputs.pg_version != '' && fromJSON(format('["{0}"]', inputs.pg_version)) || fromJSON('["16","17","18"]') }}
+
+    runs-on: ubuntu-24.04
+
+    env:
+      PG_VERSION: ${{ matrix.pg_version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install PGDG repository
+        run: |
+          sudo apt-get install -y curl ca-certificates gnupg lsb-release
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | \
+            sudo gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] \
+            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | \
+            sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get install -y \
+            build-essential cmake ninja-build pkg-config \
+            postgresql-${PG_VERSION} postgresql-server-dev-${PG_VERSION} \
+            libssl-dev libcurl4-openssl-dev \
+            libjansson-dev libsnappy-dev liblzma-dev \
+            liblz4-dev zlib1g-dev \
+            libreadline-dev libxml2-dev libxslt1-dev \
+            libpq-dev libkrb5-dev \
+            libselinux1-dev libzstd-dev libpam0g-dev
+          echo "/usr/lib/postgresql/${PG_VERSION}/bin" >> $GITHUB_PATH
+
+      - name: Create pgcommon/pgport symlinks
+        run: |
+          PG_PKGLIBDIR="$(pg_config --pkglibdir)"
+          PG_LIBDIR="$(pg_config --libdir)"
+          for lib in libpgcommon.a libpgport.a; do
+            if [ -f "${PG_PKGLIBDIR}/${lib}" ] && [ ! -f "${PG_LIBDIR}/${lib}" ]; then
+              sudo ln -sf "${PG_PKGLIBDIR}/${lib}" "${PG_LIBDIR}/${lib}"
+            fi
+          done
+
+      - name: Download libduckdb.so
+        uses: actions/download-artifact@v4
+        with:
+          name: libduckdb
+          path: /tmp/duckdb-artifact
+
+      - name: Download DuckDB headers
+        uses: actions/download-artifact@v4
+        with:
+          name: duckdb-headers
+          path: /tmp/duckdb-headers
+
+      - name: Install DuckDB into PG directories
+        run: |
+          PG_LIBDIR="$(pg_config --libdir)"
+          PG_INCLUDEDIR="$(pg_config --includedir)"
+          sudo install /tmp/duckdb-artifact/libduckdb.so "${PG_LIBDIR}/libduckdb.so"
+          sudo install /tmp/duckdb-headers/duckdb.h "${PG_INCLUDEDIR}/"
+          sudo install /tmp/duckdb-headers/duckdb.hpp "${PG_INCLUDEDIR}/"
+          sudo install /tmp/duckdb-headers/duckdb_extension.h "${PG_INCLUDEDIR}/"
+
+      - name: Download avro
+        uses: actions/download-artifact@v4
+        with:
+          name: avro
+          path: /tmp/avro-artifact
+
+      - name: Install avro into PG directories
+        run: |
+          PG_LIBDIR="$(pg_config --libdir)"
+          PG_INCLUDEDIR="$(pg_config --includedir)"
+          sudo install /tmp/avro-artifact/lib*/libavro.* "${PG_LIBDIR}/"
+          sudo install -d "${PG_INCLUDEDIR}/avro"
+          sudo install /tmp/avro-artifact/include/avro/* "${PG_INCLUDEDIR}/avro/"
+          sudo install /tmp/avro-artifact/include/avro.h "${PG_INCLUDEDIR}/"
+
+      - name: Build PostgreSQL extensions
+        run: |
+          sudo make install-pg_extension_base
+          sudo make install-pg_map
+          sudo make install-pg_extension_updater
+          sudo make install-pg_lake_engine
+          sudo make install-pg_lake_iceberg
+          sudo make install-pg_lake_table
+          sudo make install-pg_lake_copy
+          sudo make install-pg_lake
+
+      - name: Build pgduck_server (no Azure, no AWS SDK)
+        run: sudo make install-pgduck_server PG_LAKE_AZURE_SUPPORT=0 PG_LAKE_AWS_SDK_SUPPORT=0 DUCKDB_BUILD_USE_CACHE=1
+
+      - name: Build .deb package
+        run: |
+          PG_LIBDIR="$(pg_config --libdir)"
+          PG_PKGLIBDIR="$(pg_config --pkglibdir)"
+          PG_SHAREDIR="$(pg_config --sharedir)"
+          PG_BINDIR="$(pg_config --bindir)"
+          CODENAME="$(lsb_release -cs)"
+          echo "CODENAME=${CODENAME}" >> $GITHUB_ENV
+
+          PKG_VERSION=$(grep 'default_version' pg_lake/pg_lake.control | sed "s/.*'\(.*\)'/\1/")
+          PKG_NAME="pg-lake-copy-pg${PG_VERSION}"
+          DEB_FILE="${PKG_NAME}_${PKG_VERSION}-1_amd64.deb"
+          echo "DEB_FILE=${DEB_FILE}" >> $GITHUB_ENV
+
+          STAGING="/tmp/${PKG_NAME}_${PKG_VERSION}-1_amd64"
+          rm -rf "${STAGING}"
+
+          # Extension shared libraries
+          mkdir -p "${STAGING}${PG_PKGLIBDIR}"
+          for ext in pg_lake_copy pg_lake_engine pg_lake_iceberg pg_lake_table pg_lake \
+                     pg_extension_base pg_map pg_extension_updater; do
+            cp "${PG_PKGLIBDIR}/${ext}.so" "${STAGING}${PG_PKGLIBDIR}/" 2>/dev/null || \
+            cp "${PG_LIBDIR}/${ext}.so" "${STAGING}${PG_PKGLIBDIR}/" 2>/dev/null || true
+          done
+
+          # DuckDB and avro shared libraries
+          mkdir -p "${STAGING}${PG_LIBDIR}"
+          cp "${PG_LIBDIR}/libduckdb.so" "${STAGING}${PG_LIBDIR}/"
+          AVRO_REAL=$(readlink -f "${PG_LIBDIR}/libavro.so")
+          AVRO_BASENAME=$(basename "${AVRO_REAL}")
+          cp "${AVRO_REAL}" "${STAGING}${PG_LIBDIR}/${AVRO_BASENAME}"
+          ln -sf "${AVRO_BASENAME}" "${STAGING}${PG_LIBDIR}/libavro.so.24"
+          ln -sf "${AVRO_BASENAME}" "${STAGING}${PG_LIBDIR}/libavro.so"
+
+          # Extension control and SQL files
+          mkdir -p "${STAGING}${PG_SHAREDIR}/extension"
+          for ext in pg_lake_copy pg_lake_engine pg_lake_iceberg pg_lake_table pg_lake \
+                     pg_extension_base pg_map pg_extension_updater; do
+            cp "${PG_SHAREDIR}/extension/${ext}"* "${STAGING}${PG_SHAREDIR}/extension/" 2>/dev/null || true
+          done
+
+          # pgduck_server binary
+          mkdir -p "${STAGING}${PG_BINDIR}"
+          cp "${PG_BINDIR}/pgduck_server" "${STAGING}${PG_BINDIR}/"
+
+          # DEBIAN control
+          mkdir -p "${STAGING}/DEBIAN"
+          cat > "${STAGING}/DEBIAN/control" <<CTRL
+          Package: ${PKG_NAME}
+          Version: ${PKG_VERSION}-1
+          Section: database
+          Priority: optional
+          Architecture: amd64
+          Depends: postgresql-${PG_VERSION}, libssl3 (>= 3.0), libcurl4 (>= 7.68), libjansson4, zlib1g, libstdc++6, libpq5
+          Maintainer: pg_lake contributors
+          Homepage: https://github.com/snowflake-labs/pg_lake
+          Description: pg_lake data-lake extensions for PostgreSQL ${PG_VERSION} (S3-only, no Azure)
+           Includes pg_lake_copy, pg_lake_table, pg_lake_iceberg, pg_lake_engine,
+           pgduck_server (DuckDB query engine), and all dependency extensions.
+           Built without Azure SDK — S3 and GCS supported via DuckDB httpfs.
+          CTRL
+          sed -i 's/^          //' "${STAGING}/DEBIAN/control"
+
+          dpkg-deb --build --root-owner-group "${STAGING}" "${DEB_FILE}"
+          ls -lh "${DEB_FILE}"
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DEB_FILE }}
+          path: ${{ env.DEB_FILE }}
+
+      - name: Upload release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.DEB_FILE }}
