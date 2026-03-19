@@ -59,7 +59,8 @@ Requires=postgresql@%i.service
 [Service]
 Type=simple
 User=postgres
-ExecStart=/usr/lib/postgresql/%i/bin/pgduck_server
+ExecStartPre=/bin/sh -c 'PG_VERSION=$(echo %i | cut -d- -f1) && test -x /usr/lib/postgresql/$PG_VERSION/bin/pgduck_server'
+ExecStart=/bin/sh -c 'exec /usr/lib/postgresql/$(echo %i | cut -d- -f1)/bin/pgduck_server'
 Restart=on-failure
 RestartSec=5
 

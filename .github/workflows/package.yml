@@ -243,7 +243,7 @@ jobs:
           sudo make install-pg_lake
 
       - name: Build pgduck_server (no Azure, no AWS SDK)
-        run: sudo make install-pgduck_server PG_LAKE_AZURE_SUPPORT=0 PG_LAKE_AWS_SDK_SUPPORT=0 DUCKDB_BUILD_USE_CACHE=1
+        run: sudo make install-pgduck_server PG_LAKE_AZURE_SUPPORT=0 PG_LAKE_AWS_SDK_SUPPORT=0 PG_LAKE_SPATIAL_SUPPORT=0 DUCKDB_BUILD_USE_CACHE=1
 
       - name: Build .deb package
         run: .github/build-deb.sh "${PG_VERSION}" "${{ matrix.deb_arch }}"

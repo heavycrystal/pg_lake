@@ -142,7 +142,7 @@ build_pgduck_server() {
     cd "${SCRIPT_DIR}"
 
     # DUCKDB_BUILD_USE_CACHE=1 skips DuckDB rebuild (already installed above)
-    sudo make install-pgduck_server PG_LAKE_AZURE_SUPPORT=0 PG_LAKE_AWS_SDK_SUPPORT=0 DUCKDB_BUILD_USE_CACHE=1
+    sudo make install-pgduck_server PG_LAKE_AZURE_SUPPORT=0 PG_LAKE_AWS_SDK_SUPPORT=0 PG_LAKE_SPATIAL_SUPPORT=0 DUCKDB_BUILD_USE_CACHE=1
 }
 
 # ---------- step 8: verify installation ----------

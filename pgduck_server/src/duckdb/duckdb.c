@@ -263,6 +263,7 @@ duckdb_global_init(char *databaseFilePath,
 		return DUCKDB_INITIALIZATION_ERROR;
 #endif
 
+#if PG_LAKE_SPATIAL_SUPPORT == 1
 	/*
 	 * spatial is not a built-in module and does not work to be autoinstalled
 	 */
@@ -271,6 +272,7 @@ duckdb_global_init(char *databaseFilePath,
 
 	if (run_command_on_duckdb("LOAD spatial") == DuckDBError)
 		return DUCKDB_INITIALIZATION_ERROR;
+#endif
 
 #if PG_LAKE_DELTA_SUPPORT == 1
 
