@@ -14,6 +14,7 @@ on:
           - '17'
           - '18'
   push:
+    branches: [main]
     tags:
       - 'v*'
 
@@ -56,7 +57,6 @@ jobs:
           echo "/usr/lib/postgresql/17/bin" >> $GITHUB_PATH
 
       - name: Cache DuckDB build
-        id: duckdb-cache
         uses: actions/cache@v5
         with:
           path: |
@@ -75,18 +75,20 @@ jobs:
           fi
 
       - name: Upload libduckdb.so
+        if: github.ref != 'refs/heads/main'
         run: |
           cp duckdb_pglake/libduckdb.so libduckdb-stripped.so
           strip libduckdb-stripped.so
 
       - uses: actions/upload-artifact@v6
+        if: github.ref != 'refs/heads/main'
         with:
           name: libduckdb-${{ matrix.arch }}
           path: libduckdb-stripped.so
           retention-days: 1
 
       - name: Upload DuckDB headers
-        if: matrix.arch == 'amd64'
+        if: github.ref != 'refs/heads/main' && matrix.arch == 'amd64'
         uses: actions/upload-artifact@v6
         with:
           name: duckdb-headers
@@ -98,6 +100,7 @@ jobs:
 
   # ── Build avro once per arch (also PG-independent) ──────────────
   build-avro:
+    if: github.ref != 'refs/heads/main'
     strategy:
       matrix:
         arch: [amd64, arm64]
@@ -135,6 +138,7 @@ jobs:
 
   # ── Package per PG version × arch ──────────────────────────────
   package:
+    if: github.ref != 'refs/heads/main'
     needs: [build-duckdb, build-avro]
 
     strategy:
@@ -294,38 +298,36 @@ jobs:
           # systemd service
           mkdir -p "${STAGING}/lib/systemd/system"
           cat > "${STAGING}/lib/systemd/system/pgduck-server@.service" <<'SVC'
-          [Unit]
-          Description=pgduck_server for PostgreSQL %i
-          After=postgresql@%i.service
-          Requires=postgresql@%i.service
+[Unit]
+Description=pgduck_server for PostgreSQL %i
+After=postgresql@%i.service
+Requires=postgresql@%i.service
 
-          [Service]
-          Type=simple
-          User=postgres
-          ExecStart=/usr/lib/postgresql/%i/bin/pgduck_server
-          Restart=on-failure
-          RestartSec=5
+[Service]
+Type=simple
+User=postgres
+ExecStart=/usr/lib/postgresql/%i/bin/pgduck_server
+Restart=on-failure
+RestartSec=5
 
-          [Install]
-          WantedBy=multi-user.target
-          SVC
-          sed -i 's/^          //' "${STAGING}/lib/systemd/system/pgduck-server@.service"
+[Install]
+WantedBy=multi-user.target
+SVC
 
           # postinst: enable pgduck_server service
-          cat > "${STAGING}/DEBIAN/postinst" <<POST
-          #!/bin/sh
-          set -e
-          systemctl daemon-reload || true
+          cat > "${STAGING}/DEBIAN/postinst" <<'POST'
+#!/bin/sh
+set -e
+systemctl daemon-reload || true
 
-          # Enable and start pgduck_server for all installed PG clusters
-          for conf in /etc/postgresql/*/main/postgresql.conf; do
-            [ -f "\$conf" ] || continue
-            cluster=\$(echo "\$conf" | sed 's|/etc/postgresql/\(.*\)/\(.*\)/postgresql.conf|\1-\2|')
-            systemctl enable pgduck-server@"\$cluster" || true
-            systemctl start pgduck-server@"\$cluster" || true
-          done
-          POST
-          sed -i 's/^          //' "${STAGING}/DEBIAN/postinst"
+# Enable and start pgduck_server for all installed PG clusters
+for conf in /etc/postgresql/*/main/postgresql.conf; do
+  [ -f "$conf" ] || continue
+  cluster=$(echo "$conf" | sed 's|/etc/postgresql/\(.*\)/\(.*\)/postgresql.conf|\1-\2|')
+  systemctl enable pgduck-server@"$cluster" || true
+  systemctl start pgduck-server@"$cluster" || true
+done
+POST
           chmod 755 "${STAGING}/DEBIAN/postinst"
 
           # Strip debug info from all binaries
@@ -336,20 +338,19 @@ jobs:
           # DEBIAN control
           mkdir -p "${STAGING}/DEBIAN"
           cat > "${STAGING}/DEBIAN/control" <<CTRL
-          Package: ${PKG_NAME}
-          Version: ${PKG_VERSION}-1
-          Section: database
-          Priority: optional
-          Architecture: ${DEB_ARCH}
-          Depends: postgresql-${PG_VERSION}, libssl3 (>= 3.0), libcurl4 (>= 7.68), libjansson4, zlib1g, libstdc++6, libpq5, libnuma1
-          Maintainer: pg_lake contributors
-          Homepage: https://github.com/snowflake-labs/pg_lake
-          Description: pg_lake data-lake extensions for PostgreSQL ${PG_VERSION} (S3-only, no Azure)
-           Includes pg_lake_copy, pg_lake_table, pg_lake_iceberg, pg_lake_engine,
-           pgduck_server (DuckDB query engine), and all dependency extensions.
-           Built without Azure SDK — S3 and GCS supported via DuckDB httpfs.
-          CTRL
-          sed -i 's/^          //' "${STAGING}/DEBIAN/control"
+Package: ${PKG_NAME}
+Version: ${PKG_VERSION}-1
+Section: database
+Priority: optional
+Architecture: ${DEB_ARCH}
+Depends: postgresql-${PG_VERSION}, libssl3 (>= 3.0), libcurl4 (>= 7.68), libjansson4, zlib1g, libstdc++6, libpq5, libnuma1
+Maintainer: pg_lake contributors
+Homepage: https://github.com/snowflake-labs/pg_lake
+Description: pg_lake data-lake extensions for PostgreSQL ${PG_VERSION} (S3-only, no Azure)
+ Includes pg_lake_copy, pg_lake_table, pg_lake_iceberg, pg_lake_engine,
+ pgduck_server (DuckDB query engine), and all dependency extensions.
+ Built without Azure SDK — S3 and GCS supported via DuckDB httpfs.
+CTRL
 
           dpkg-deb --build --root-owner-group "${STAGING}" "${DEB_FILE}"
           ls -lh "${DEB_FILE}"
