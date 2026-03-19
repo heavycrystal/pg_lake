@@ -8,12 +8,9 @@ from utils_pytest import *
 
 @pytest.fixture()
 def execute_in_pgduck(superuser_conn, app_user):
-    # Create a test function
+    # Function is now installed by the extension; just grant access to test user
     run_command(
         f"""
-        CREATE OR REPLACE FUNCTION execute_in_pgduck(query text)
-        RETURNS void LANGUAGE C STRICT
-        AS 'pg_lake_copy', $$execute_in_pgduck$$;
         GRANT EXECUTE ON FUNCTION execute_in_pgduck(text) TO {app_user};
     """,
         superuser_conn,
@@ -22,7 +19,12 @@ def execute_in_pgduck(superuser_conn, app_user):
 
     yield
 
-    run_command("DROP FUNCTION execute_in_pgduck(text)", superuser_conn)
+    run_command(
+        f"""
+        REVOKE EXECUTE ON FUNCTION execute_in_pgduck(text) FROM {app_user};
+    """,
+        superuser_conn,
+    )
     superuser_conn.commit()
 
 
