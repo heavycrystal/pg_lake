@@ -18,9 +18,18 @@ on:
       - 'v*'
 
 jobs:
-  # ── Build DuckDB once (PG-independent) ──────────────────────────
+  # ── Build DuckDB once per arch (PG-independent) ─────────────────
   build-duckdb:
-    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Checkout repository
@@ -53,7 +62,7 @@ jobs:
           path: |
             duckdb_pglake/build
             duckdb_pglake/libduckdb.so
-          key: duckdb-no-azure-${{ hashFiles('duckdb_pglake/Makefile', 'duckdb_pglake/extension_config.cmake', 'duckdb_pglake/CMakeLists.txt', 'duckdb_pglake/src/**') }}
+          key: duckdb-no-azure-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('duckdb_pglake/Makefile', 'duckdb_pglake/extension_config.cmake', 'duckdb_pglake/CMakeLists.txt', 'duckdb_pglake/src/**') }}
 
       - name: Build DuckDB (no Azure, no AWS SDK)
         if: steps.duckdb-cache.outputs.cache-hit != 'true'
@@ -66,11 +75,12 @@ jobs:
 
       - uses: actions/upload-artifact@v6
         with:
-          name: libduckdb
+          name: libduckdb-${{ matrix.arch }}
           path: libduckdb-stripped.so
           retention-days: 1
 
       - name: Upload DuckDB headers
+        if: matrix.arch == 'amd64'
         uses: actions/upload-artifact@v6
         with:
           name: duckdb-headers
@@ -80,9 +90,18 @@ jobs:
             duckdb_pglake/duckdb/src/include/duckdb_extension.h
           retention-days: 1
 
-  # ── Build avro once (also PG-independent) ───────────────────────
+  # ── Build avro once per arch (also PG-independent) ──────────────
   build-avro:
-    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Checkout repository
@@ -104,19 +123,27 @@ jobs:
       - name: Upload avro libs + headers
         uses: actions/upload-artifact@v6
         with:
-          name: avro
+          name: avro-${{ matrix.arch }}
           path: avro/lang/c/build/avrolib/
           retention-days: 1
 
-  # ── Package per PG version ──────────────────────────────────────
+  # ── Package per PG version × arch ──────────────────────────────
   package:
     needs: [build-duckdb, build-avro]
 
     strategy:
       matrix:
         pg_version: ${{ github.event_name == 'workflow_dispatch' && inputs.pg_version != '' && fromJSON(format('["{0}"]', inputs.pg_version)) || fromJSON('["16","17","18"]') }}
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+            deb_arch: amd64
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+            deb_arch: arm64
 
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
 
     env:
       PG_VERSION: ${{ matrix.pg_version }}
@@ -163,7 +190,7 @@ jobs:
       - name: Download libduckdb.so
         uses: actions/download-artifact@v7
         with:
-          name: libduckdb
+          name: libduckdb-${{ matrix.arch }}
           path: /tmp/duckdb-artifact
 
       - name: Download DuckDB headers
@@ -184,7 +211,7 @@ jobs:
       - name: Download avro
         uses: actions/download-artifact@v7
         with:
-          name: avro
+          name: avro-${{ matrix.arch }}
           path: /tmp/avro-artifact
 
       - name: Install avro into PG directories
@@ -217,7 +244,7 @@ jobs:
           PG_SHAREDIR="$(pg_config --sharedir)"
           PG_BINDIR="$(pg_config --bindir)"
           CODENAME="$(lsb_release -cs)"
-          echo "CODENAME=${CODENAME}" >> $GITHUB_ENV
+          DEB_ARCH="${{ matrix.deb_arch }}"
 
           BASE_VERSION=$(grep 'default_version' pg_lake/pg_lake.control | sed "s/.*'\(.*\)'/\1/")
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
@@ -226,10 +253,10 @@ jobs:
             PKG_VERSION="${BASE_VERSION}~dev.${GITHUB_SHA::8}"
           fi
           PKG_NAME="pg-lake-copy-pg${PG_VERSION}"
-          DEB_FILE="${PKG_NAME}_${PKG_VERSION}-1_amd64.deb"
+          DEB_FILE="${PKG_NAME}_${PKG_VERSION}-1_${DEB_ARCH}.deb"
           echo "DEB_FILE=${DEB_FILE}" >> $GITHUB_ENV
 
-          STAGING="/tmp/${PKG_NAME}_${PKG_VERSION}-1_amd64"
+          STAGING="/tmp/${PKG_NAME}_${PKG_VERSION}-1_${DEB_ARCH}"
           rm -rf "${STAGING}"
 
           # Extension shared libraries
@@ -270,7 +297,7 @@ jobs:
           Version: ${PKG_VERSION}-1
           Section: database
           Priority: optional
-          Architecture: amd64
+          Architecture: ${DEB_ARCH}
           Depends: postgresql-${PG_VERSION}, libssl3 (>= 3.0), libcurl4 (>= 7.68), libjansson4, zlib1g, libstdc++6, libpq5, libnuma1
           Maintainer: pg_lake contributors
           Homepage: https://github.com/snowflake-labs/pg_lake
