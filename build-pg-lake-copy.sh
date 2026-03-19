@@ -56,7 +56,7 @@ install_system_deps() {
         liblz4-dev zlib1g-dev \
         libreadline-dev libxml2-dev libxslt1-dev \
         libpq-dev libkrb5-dev \
-        libselinux1-dev libzstd-dev libpam0g-dev
+        libselinux1-dev libzstd-dev libpam0g-dev libnuma-dev
 
     # Ensure pg_config from our target version is first on PATH
     export PATH="/usr/lib/postgresql/${PG_VERSION}/bin:${PATH}"
