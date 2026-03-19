@@ -285,6 +285,43 @@ jobs:
           mkdir -p "${STAGING}${PG_BINDIR}"
           cp "${PG_BINDIR}/pgduck_server" "${STAGING}${PG_BINDIR}/"
 
+          # systemd service
+          mkdir -p "${STAGING}/lib/systemd/system"
+          cat > "${STAGING}/lib/systemd/system/pgduck-server@.service" <<'SVC'
+          [Unit]
+          Description=pgduck_server for PostgreSQL %i
+          After=postgresql@%i.service
+          Requires=postgresql@%i.service
+
+          [Service]
+          Type=simple
+          User=postgres
+          ExecStart=/usr/lib/postgresql/%i/bin/pgduck_server
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          SVC
+          sed -i 's/^          //' "${STAGING}/lib/systemd/system/pgduck-server@.service"
+
+          # postinst: enable pgduck_server service
+          cat > "${STAGING}/DEBIAN/postinst" <<POST
+          #!/bin/sh
+          set -e
+          systemctl daemon-reload || true
+
+          # Enable and start pgduck_server for all installed PG clusters
+          for conf in /etc/postgresql/*/main/postgresql.conf; do
+            [ -f "\$conf" ] || continue
+            cluster=\$(echo "\$conf" | sed 's|/etc/postgresql/\(.*\)/\(.*\)/postgresql.conf|\1-\2|')
+            systemctl enable pgduck-server@"\$cluster" || true
+            systemctl start pgduck-server@"\$cluster" || true
+          done
+          POST
+          sed -i 's/^          //' "${STAGING}/DEBIAN/postinst"
+          chmod 755 "${STAGING}/DEBIAN/postinst"
+
           # Strip debug info from all binaries
           find "${STAGING}" \( -name '*.so' -o -name '*.so.*' -o -name 'pgduck_server' \) -type f -exec strip {} +
           echo "Stripped sizes:"
