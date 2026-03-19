@@ -11,8 +11,9 @@ PG_SHAREDIR="$(pg_config --sharedir)"
 PG_BINDIR="$(pg_config --bindir)"
 
 BASE_VERSION=$(grep 'default_version' pg_lake/pg_lake.control | sed "s/.*'\(.*\)'/\1/")
-if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
-  PKG_VERSION="${BASE_VERSION}"
+if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
+  TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+  PKG_VERSION="${BASE_VERSION}+tag.${TAG_VERSION}"
 else
   PKG_VERSION="${BASE_VERSION}~dev.${GITHUB_SHA:0:8}"
 fi
