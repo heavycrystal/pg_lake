@@ -55,18 +55,17 @@ cat > "${STAGING}/lib/systemd/system/pgduck-server@.service" <<'EOF'
 [Unit]
 Description=pgduck_server for PostgreSQL %i
 After=postgresql@%i.service
-Requires=postgresql@%i.service
+PartOf=postgresql@%i.service
 
 [Service]
 Type=simple
 User=postgres
-ExecStartPre=/bin/sh -c 'PG_VERSION=$(echo %i | cut -d- -f1) && test -x /usr/lib/postgresql/$PG_VERSION/bin/pgduck_server'
 ExecStart=/bin/sh -c 'exec /usr/lib/postgresql/$(echo %i | cut -d- -f1)/bin/pgduck_server'
 Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=postgresql@%i.service
 EOF
 
 # postinst
