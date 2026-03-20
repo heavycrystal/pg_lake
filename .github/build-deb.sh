@@ -71,16 +71,12 @@ EOF
 
 # postinst
 mkdir -p "${STAGING}/DEBIAN"
-cat > "${STAGING}/DEBIAN/postinst" <<'EOF'
+cat > "${STAGING}/DEBIAN/postinst" <<EOF
 #!/bin/sh
 set -e
 systemctl daemon-reload || true
-for conf in /etc/postgresql/*/main/postgresql.conf; do
-  [ -f "$conf" ] || continue
-  cluster=$(echo "$conf" | sed 's|/etc/postgresql/\(.*\)/\(.*\)/postgresql.conf|\1-\2|')
-  systemctl enable pgduck-server@"$cluster" || true
-  systemctl start pgduck-server@"$cluster" || true
-done
+systemctl enable pgduck-server@${PG_VERSION}-main || true
+systemctl start pgduck-server@${PG_VERSION}-main || true
 EOF
 chmod 755 "${STAGING}/DEBIAN/postinst"
 
