@@ -1028,6 +1028,15 @@ FindCopyToReadOptions(CopyDataFormat format, List *options)
 			}
 		}
 
+		else if (format == DATA_FORMAT_JSON)
+		{
+			if (strcmp(option->defname, "array") == 0)
+			{
+				/* pass through to DuckDB COPY TO */
+				continue;
+			}
+		}
+
 		/*
 		 * We currently do not propagate any other options.
 		 */

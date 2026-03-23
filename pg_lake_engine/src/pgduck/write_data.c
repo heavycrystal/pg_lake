@@ -250,6 +250,20 @@ WriteQueryResultTo(char *query,
 
 				appendStringInfo(&command, ", compression %s",
 								 quote_literal_cstr(compressionName));
+
+				ListCell   *optionCell2 = NULL;
+
+				foreach(optionCell2, formatOptions)
+				{
+					DefElem    *option = lfirst(optionCell2);
+
+					if (strcmp(option->defname, "array") == 0)
+					{
+						if (defGetBoolean(option))
+							appendStringInfoString(&command, ", array true");
+					}
+				}
+
 				break;
 			}
 
