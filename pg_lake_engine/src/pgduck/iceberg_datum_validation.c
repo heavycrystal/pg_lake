@@ -32,13 +32,19 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "catalog/pg_type.h"
+#include "funcapi.h"
 #include "datatype/timestamp.h"
 #include "pg_lake/pgduck/iceberg_datum_validation.h"
+#include "pg_lake/pgduck/map.h"
 #include "pg_lake/util/temporal_utils.h"
+#include "utils/array.h"
 #include "utils/date.h"
+#include "utils/lsyscache.h"
 #include "utils/numeric.h"
 #include "utils/timestamp.h"
+#include "utils/typcache.h"
 
 
 static Datum ErrorOrClampTemporal(Datum value, Oid typeOid, int year,
@@ -48,6 +54,10 @@ static Datum IcebergErrorOrClampTemporalDatum(Datum value, Oid typeOid,
 static Datum IcebergErrorOrClampNumericDatum(Datum value,
 											 IcebergOutOfRangePolicy policy,
 											 bool *isNull);
+static Datum IcebergErrorOrClampNestedDatum(Datum value, Oid typeOid,
+											int32 typmod,
+											IcebergOutOfRangePolicy policy,
+											bool *isNull, bool *modified);
 
 
 /*
@@ -227,14 +237,199 @@ IcebergErrorOrClampNumericDatum(Datum value, IcebergOutOfRangePolicy policy,
 
 
 /*
+ * IcebergErrorOrClampNestedDatum recursively validates a Datum for
+ * Iceberg write constraints, deconstructing and reconstructing arrays,
+ * composites, maps (domain over array of composites), and domains.
+ *
+ * *isNull is set to true only when a scalar numeric NaN is clamped at
+ * this recursion level.  For containers, NaN-clamped elements are
+ * absorbed as NULL within the reconstructed container.
+ *
+ * *modified is set to true when the returned Datum differs from the
+ * input, allowing callers to skip reconstruction when nothing changed.
+ */
+static Datum
+IcebergErrorOrClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
+							   IcebergOutOfRangePolicy policy,
+							   bool *isNull, bool *modified)
+{
+	*modified = false;
+
+	if (IsTemporalType(typeOid))
+	{
+		Datum		result = IcebergErrorOrClampTemporalDatum(value, typeOid,
+															  policy);
+
+		*modified = (result != value);
+		return result;
+	}
+
+	if (typeOid == NUMERICOID)
+	{
+		Datum		result = IcebergErrorOrClampNumericDatum(value, policy,
+															 isNull);
+
+		*modified = *isNull;
+		return result;
+	}
+
+	/* array types: deconstruct, validate elements, reconstruct */
+	Oid			elemType = get_element_type(typeOid);
+
+	if (OidIsValid(elemType))
+	{
+		if (!TypeNeedsIcebergValidation(elemType, false))
+			return value;
+
+		ArrayType  *array = DatumGetArrayTypeP(value);
+		int16		elmlen;
+		bool		elmbyval;
+		char		elmalign;
+
+		get_typlenbyvalalign(elemType, &elmlen, &elmbyval, &elmalign);
+
+		Datum	   *elems;
+		bool	   *nulls;
+		int			nelems;
+
+		deconstruct_array(array, elemType, elmlen, elmbyval, elmalign,
+						  &elems, &nulls, &nelems);
+
+		bool		anyModified = false;
+
+		for (int i = 0; i < nelems; i++)
+		{
+			if (nulls[i])
+				continue;
+
+			bool		elemIsNull = false;
+			bool		elemModified = false;
+			Datum		clamped = IcebergErrorOrClampNestedDatum(elems[i],
+																 elemType, -1,
+																 policy,
+																 &elemIsNull,
+																 &elemModified);
+
+			if (elemModified || elemIsNull)
+			{
+				elems[i] = clamped;
+				nulls[i] = elemIsNull;
+				anyModified = true;
+			}
+		}
+
+		if (!anyModified)
+			return value;
+
+		ArrayType  *result = construct_md_array(elems, nulls,
+												ARR_NDIM(array),
+												ARR_DIMS(array),
+												ARR_LBOUND(array),
+												elemType, elmlen,
+												elmbyval, elmalign);
+
+		*modified = true;
+		return PointerGetDatum(result);
+	}
+
+	/*
+	 * Domain types (including maps): unwrap to base type and recurse. Maps
+	 * are domains over arrays of composites, so unwrapping naturally leads to
+	 * the array -> composite recursion above.
+	 */
+	char		typtype = get_typtype(typeOid);
+
+	if (typtype == TYPTYPE_DOMAIN)
+	{
+		int32		baseTypmod = typmod;
+		Oid			baseType = getBaseTypeAndTypmod(typeOid, &baseTypmod);
+
+		return IcebergErrorOrClampNestedDatum(value, baseType, baseTypmod,
+											  policy, isNull, modified);
+	}
+
+	/* composite types: deform tuple, validate fields, reform */
+	if (typtype == TYPTYPE_COMPOSITE)
+	{
+		HeapTupleHeader tup = DatumGetHeapTupleHeader(value);
+		Oid			tupType = HeapTupleHeaderGetTypeId(tup);
+		int32		tupTypmod = HeapTupleHeaderGetTypMod(tup);
+		TupleDesc	tupdesc = lookup_rowtype_tupdesc(tupType, tupTypmod);
+		int			natts = tupdesc->natts;
+
+		HeapTupleData tmptup;
+
+		tmptup.t_len = HeapTupleHeaderGetDatumLength(tup);
+		ItemPointerSetInvalid(&(tmptup.t_self));
+		tmptup.t_tableOid = InvalidOid;
+		tmptup.t_data = tup;
+
+		Datum	   *values = (Datum *) palloc(natts * sizeof(Datum));
+		bool	   *attrNulls = (bool *) palloc(natts * sizeof(bool));
+
+		heap_deform_tuple(&tmptup, tupdesc, values, attrNulls);
+
+		bool		anyModified = false;
+
+		for (int i = 0; i < natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+			if (attr->attisdropped || attrNulls[i])
+				continue;
+
+			if (!TypeNeedsIcebergValidation(attr->atttypid, false))
+				continue;
+
+			bool		attrIsNull = false;
+			bool		attrModified = false;
+			Datum		clamped = IcebergErrorOrClampNestedDatum(values[i],
+																 attr->atttypid,
+																 attr->atttypmod,
+																 policy,
+																 &attrIsNull,
+																 &attrModified);
+
+			if (attrModified || attrIsNull)
+			{
+				values[i] = clamped;
+				attrNulls[i] = attrIsNull;
+				anyModified = true;
+			}
+		}
+
+		if (!anyModified)
+		{
+			pfree(values);
+			pfree(attrNulls);
+			ReleaseTupleDesc(tupdesc);
+			return value;
+		}
+
+		HeapTuple	newTuple = heap_form_tuple(tupdesc, values, attrNulls);
+
+		pfree(values);
+		pfree(attrNulls);
+		ReleaseTupleDesc(tupdesc);
+		*modified = true;
+		return HeapTupleGetDatum(newTuple);
+	}
+
+	return value;
+}
+
+
+/*
  * IcebergErrorOrClampDatum validates a Datum for Iceberg write constraints.
  *
- * Dispatches to temporal validation (date/timestamp/timestamptz) or
- * numeric NaN rejection based on typeOid.  For types that need no
- * validation the value is returned unchanged.
+ * Recursively handles scalar types (date/timestamp/timestamptz/numeric)
+ * as well as nested containers (arrays, composites, maps, domains).
+ * For types that need no validation the value is returned unchanged.
  *
- * *isNull is set to true only when a numeric NaN is clamped (the
- * caller should write NULL instead of the original value).
+ * *isNull is set to true only when a top-level numeric NaN is clamped
+ * (the caller should write NULL instead of the original value).
+ * NaN values nested inside containers are absorbed as NULL within
+ * the reconstructed container.
  */
 Datum
 IcebergErrorOrClampDatum(Datum value, Oid typeOid,
@@ -242,11 +437,8 @@ IcebergErrorOrClampDatum(Datum value, Oid typeOid,
 {
 	*isNull = false;
 
-	if (IsTemporalType(typeOid))
-		return IcebergErrorOrClampTemporalDatum(value, typeOid, policy);
+	bool		modified = false;
 
-	if (typeOid == NUMERICOID)
-		return IcebergErrorOrClampNumericDatum(value, policy, isNull);
-
-	return value;
+	return IcebergErrorOrClampNestedDatum(value, typeOid, -1, policy,
+										  isNull, &modified);
 }

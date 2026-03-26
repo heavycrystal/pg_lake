@@ -22,12 +22,14 @@
 /*
  * IcebergErrorOrClampDatum validates a Datum for Iceberg write constraints.
  *
- * Dispatches to temporal validation (date/timestamp/timestamptz) or
- * numeric NaN validation based on typeOid.  For types that need no
- * validation the value is returned unchanged.
+ * Recursively handles scalar types (date/timestamp/timestamptz/numeric)
+ * as well as nested containers (arrays, composites, maps, domains).
+ * For types that need no validation the value is returned unchanged.
  *
- * *isNull is set to true only when a numeric NaN is clamped (the
- * caller should write NULL instead of the original value).
+ * *isNull is set to true only when a top-level numeric NaN is clamped
+ * (the caller should write NULL instead of the original value).
+ * NaN values nested inside containers are absorbed as NULL within
+ * the reconstructed container.
  */
 extern PGDLLEXPORT Datum IcebergErrorOrClampDatum(Datum value, Oid typeOid,
 												  IcebergOutOfRangePolicy policy,

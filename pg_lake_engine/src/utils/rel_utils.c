@@ -20,26 +20,32 @@
 
 #include "access/htup_details.h"
 #include "catalog/pg_foreign_table.h"
-#include "foreign/foreign.h"
-#include "utils/builtins.h"
-#include "utils/rel.h"
-#include "utils/relcache.h"
-#include "utils/lsyscache.h"
-#include "utils/relcache.h"
-#include "utils/syscache.h"
+#include "access/xact.h"
 #include "commands/defrem.h"
-#include "utils/acl.h"
-
+#include "commands/typecmds.h"
+#include "foreign/foreign.h"
+#include "nodes/makefuncs.h"
 #include "catalog/pg_type.h"
 #include "parser/parser.h"
 #include "parser/parse_type.h"
+#include "utils/acl.h"
+#include "utils/builtins.h"
+#include "utils/lsyscache.h"
+#include "utils/rel.h"
+#include "utils/relcache.h"
+#include "utils/syscache.h"
+#include "utils/typcache.h"
 
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/parsetree/options.h"
+#include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/numeric.h"
+#include "pg_lake/pgduck/parse_struct.h"
+#include "pg_lake/pgduck/type.h"
 #include "pg_lake/util/rel_utils.h"
+#include "pg_lake/util/string_utils.h"
 
 
 PgLakeTableType
@@ -260,13 +266,9 @@ GetWritableTableLocation(Oid relationId, char **queryArguments)
 			*queryArguments = psprintf("?%s", queryParamSeparator + 1);
 	}
 
-	int			locationLength = strlen(location);
+	bool		inPlace = true;
 
-	/* normalize prefix to not have a trailing slash */
-	if (location[locationLength - 1] == '/')
-		location[locationLength - 1] = '\0';
-
-	return location;
+	return StripTrailingSlash(location, inPlace);
 }
 
 /*
@@ -397,19 +399,157 @@ GetPgLakeTableProperties(Oid relationId)
 }
 
 
-static bool
-IsUnsupportedNumericForIceberg(int32 typmod)
+/*
+ * FindOrCreateCompositeTypeFromColumnDefs builds a DuckDB STRUCT type string
+ * from a list of ColumnDef nodes and delegates to GetOrCreatePGStructType,
+ * which finds a matching existing type or creates a new one.
+ */
+static Oid
+FindOrCreateCompositeTypeFromColumnDefs(List *coldeflist)
 {
-	if (IsUnboundedNumeric(NUMERICOID, typmod))
-		return true;
+	StringInfoData buf;
+	ListCell   *lc;
+	bool		first = true;
 
-	int			precision = -1;
-	int			scale = -1;
+	initStringInfo(&buf);
+	appendStringInfoString(&buf, "STRUCT(");
 
-	GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(typmod, &precision, &scale);
+	foreach(lc, coldeflist)
+	{
+		ColumnDef  *colDef = lfirst(lc);
+		Oid			colTypeOid;
+		int32		colTypmod;
 
-	return precision > DUCKDB_MAX_NUMERIC_PRECISION ||
-		scale > DUCKDB_MAX_NUMERIC_SCALE;
+		typenameTypeIdAndMod(NULL, colDef->typeName, &colTypeOid, &colTypmod);
+
+		if (!first)
+			appendStringInfoString(&buf, ", ");
+		first = false;
+
+		appendStringInfo(&buf, "%s %s",
+						 colDef->colname,
+						 GetFullDuckDBTypeNameForPGType(MakePGType(colTypeOid, colTypmod),
+														DATA_FORMAT_ICEBERG));
+	}
+
+	appendStringInfoChar(&buf, ')');
+
+	return GetOrCreatePGStructType(buf.data);
+}
+
+
+/*
+ * MaybeConvertType recursively converts a type that contains unsupported
+ * numerics.  Returns a PGType with the replacement OID, or with InvalidOid
+ * when no conversion is needed.
+ *
+ *   numeric (unsupported)       -> FLOAT8OID
+ *   array of X                  -> array of MaybeConvertType(X)
+ *   map (domain over array)     -> new map via GetOrCreatePGMapType
+ *   domain (non-map)            -> unwrap and recurse into base type
+ *   composite containing any    -> new composite via GetOrCreatePGStructType
+ */
+PGType
+MaybeConvertType(PGType type, char *columnName)
+{
+	Oid			typeOid = type.postgresTypeOid;
+	int32		typmod = type.postgresTypeMod;
+
+	/* unsupported numeric -> float8 */
+	if (IsUnsupportedNumericForIceberg(typeOid, typmod))
+		return MakePGTypeOid(FLOAT8OID);
+
+	/* array: recurse into element type */
+	Oid			elemType = get_element_type(typeOid);
+
+	if (OidIsValid(elemType))
+	{
+		PGType		converted = MaybeConvertType(MakePGType(elemType, typmod),
+												 columnName);
+
+		if (OidIsValid(converted.postgresTypeOid))
+			return MakePGTypeOid(get_array_type(converted.postgresTypeOid));
+		return MakePGTypeOid(InvalidOid);
+	}
+
+	/* map check must precede the generic domain unwrap (maps are domains) */
+	if (IsMapTypeOid(typeOid))
+	{
+		PGType		keyType = GetMapKeyType(typeOid);
+		PGType		valType = GetMapValueType(typeOid);
+		PGType		newKey = MaybeConvertType(keyType, columnName);
+		PGType		newVal = MaybeConvertType(valType, columnName);
+
+		if (!OidIsValid(newKey.postgresTypeOid) &&
+			!OidIsValid(newVal.postgresTypeOid))
+			return MakePGTypeOid(InvalidOid);
+
+		Oid			finalKeyOid = OidIsValid(newKey.postgresTypeOid) ? newKey.postgresTypeOid : keyType.postgresTypeOid;
+		Oid			finalValOid = OidIsValid(newVal.postgresTypeOid) ? newVal.postgresTypeOid : valType.postgresTypeOid;
+		const char *mapTypeName = psprintf("MAP(%s,%s)",
+										   GetFullDuckDBTypeNameForPGType(MakePGTypeOid(finalKeyOid), DATA_FORMAT_ICEBERG),
+										   GetFullDuckDBTypeNameForPGType(MakePGTypeOid(finalValOid), DATA_FORMAT_ICEBERG));
+
+		Oid			mapOid = GetOrCreatePGMapType(mapTypeName);
+
+		return MakePGTypeOid(mapOid);
+	}
+
+	char		typeType = get_typtype(typeOid);
+
+	/* domain (non-map): unwrap and recurse */
+	if (typeType == TYPTYPE_DOMAIN)
+	{
+		Oid			baseType = getBaseTypeAndTypmod(typeOid, &typmod);
+
+		return MaybeConvertType(MakePGType(baseType, typmod), columnName);
+	}
+
+	/* composite: check each attribute */
+	if (typeType == TYPTYPE_COMPOSITE)
+	{
+		TupleDesc	tupdesc = lookup_rowtype_tupdesc(typeOid, -1);
+		List	   *coldeflist = NIL;
+		bool		needsConversion = false;
+
+		for (int i = 0; i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+			if (attr->attisdropped)
+				continue;
+
+			Oid			targetType = attr->atttypid;
+			int32		targetTypmod = attr->atttypmod;
+			PGType		converted = MaybeConvertType(
+													 MakePGType(targetType, targetTypmod), columnName);
+
+			if (OidIsValid(converted.postgresTypeOid))
+			{
+				targetType = converted.postgresTypeOid;
+				targetTypmod = converted.postgresTypeMod;
+				needsConversion = true;
+			}
+
+			ColumnDef  *colDef = makeNode(ColumnDef);
+
+			colDef->colname = pstrdup(NameStr(attr->attname));
+			colDef->typeName = makeTypeNameFromOid(targetType, targetTypmod);
+			colDef->is_local = true;
+			coldeflist = lappend(coldeflist, colDef);
+		}
+
+		ReleaseTupleDesc(tupdesc);
+
+		if (!needsConversion)
+			return MakePGTypeOid(InvalidOid);
+
+		Oid			compositeOid = FindOrCreateCompositeTypeFromColumnDefs(coldeflist);
+
+		return MakePGTypeOid(compositeOid);
+	}
+
+	return MakePGTypeOid(InvalidOid);
 }
 
 
@@ -418,6 +558,12 @@ IsUnsupportedNumericForIceberg(int32 typmod)
  * cannot be represented as Iceberg decimals (unbounded or precision > 38) to
  * float8, when pg_lake_iceberg.unsupported_numeric_as_double is enabled.
  * Does nothing when the GUC is off.
+ *
+ * For top-level numeric and numeric arrays the ColumnDef's typeName is
+ * replaced directly.  For composite types and map types a *new* type is
+ * created (in lake_struct / map_type schemas) and the column definition
+ * is pointed to the new type; the original user-defined type is never
+ * modified.
  */
 void
 MaybeConvertUnsupportedNumericColumnsToDouble(List *columnDefList)
@@ -452,20 +598,20 @@ MaybeConvertUnsupportedNumericColumnsToDouble(List *columnDefList)
 		typeOid = ((Form_pg_type) GETSTRUCT(tup))->oid;
 		ReleaseSysCache(tup);
 
-		if (typeOid != NUMERICOID)
-			continue;
+		PGType		converted = MaybeConvertType(MakePGType(typeOid, typmod),
+												 columnDef->colname);
 
-		if (!IsUnsupportedNumericForIceberg(typmod))
+		if (!OidIsValid(converted.postgresTypeOid))
 			continue;
 
 		ereport(NOTICE,
-				(errmsg("column \"%s\" has numeric type that cannot be stored "
-						"as an Iceberg decimal, converting to double precision",
+				(errmsg("column \"%s\" has type that cannot be stored as an "
+						"Iceberg decimal, converting to double precision",
 						columnDef->colname),
 				 errhint("Use numeric(P,S) with precision <= %d to preserve "
 						 "exact decimal semantics.",
 						 DUCKDB_MAX_NUMERIC_PRECISION)));
 
-		columnDef->typeName = SystemTypeName("float8");
+		columnDef->typeName = makeTypeNameFromOid(converted.postgresTypeOid, converted.postgresTypeMod);
 	}
 }

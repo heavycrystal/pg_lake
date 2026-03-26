@@ -23,6 +23,7 @@
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/util/rel_utils.h"
+#include "pg_lake/util/string_utils.h"
 #include "pg_extension_base/spi_helpers.h"
 #include "catalog/namespace.h"
 #include "commands/dbcommands.h"
@@ -35,6 +36,7 @@ char	   *IcebergDefaultLocationPrefix = NULL;
 char	   *IcebergDefaultCatalog = POSTGRES_CATALOG_NAME;
 
 static char *GetIcebergExternalMetadataLocation(Oid relationId);
+static char *GetIcebergCatalogMetadataLocation(Oid relationId, bool forUpdate);
 static char *GetIcebergCatalogMetadataLocationInternal(Oid relationId, bool isPrevMetadata, bool forUpdate);
 static char *GetIcebergCatalogColumnInternal(Oid relationId, char *columnName, bool forUpdate, bool errorIfNotFound);
 static void ErrorIfSameTableExistsInExternalCatalog(Oid relationId);
@@ -390,7 +392,18 @@ GetIcebergMetadataLocation(Oid relationId, bool forUpdate)
 	}
 	else
 	{
-		return GetIcebergCatalogMetadataLocation(relationId, forUpdate);
+		char	   *metadataLocation = GetIcebergCatalogMetadataLocation(relationId, forUpdate);
+
+		/*
+		 * Iceberg table exists, but metadata_location is NULL. We only expect
+		 * this for REST
+		 */
+		if (metadataLocation == NULL)
+			ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+							errmsg("metadata location of table %s could not be found",
+								   get_rel_name(relationId))));
+
+		return metadataLocation;
 	}
 }
 
@@ -402,7 +415,7 @@ GetIcebergMetadataLocation(Oid relationId, bool forUpdate)
 * If the metadata row for the table is going to be updated, the caller should
 * pass forUpdate as true.
 */
-char *
+static char *
 GetIcebergCatalogMetadataLocation(Oid relationId, bool forUpdate)
 {
 	Assert(IsInternalIcebergTable(relationId));
@@ -715,24 +728,9 @@ UpdateAllInternalIcebergTablesToReadOnly(void)
 char *
 GetIcebergDefaultLocationPrefix(void)
 {
-	if (IcebergDefaultLocationPrefix == NULL)
-	{
-		return NULL;
-	}
+	bool		inPlace = false;
 
-	size_t		len = strlen(IcebergDefaultLocationPrefix);
-
-	if (len > 0 && IcebergDefaultLocationPrefix[len - 1] == '/')
-	{
-		/* remove trailing "/" */
-		char	   *locationPrefixRemovedTrailingSlash = pstrdup(IcebergDefaultLocationPrefix);
-
-		locationPrefixRemovedTrailingSlash[len - 1] = '\0';
-
-		return locationPrefixRemovedTrailingSlash;
-	}
-
-	return IcebergDefaultLocationPrefix;
+	return StripTrailingSlash(IcebergDefaultLocationPrefix, inPlace);
 }
 
 
