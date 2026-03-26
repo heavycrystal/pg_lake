@@ -1,0 +1,73 @@
+diff --git a/src/aws_secret.cpp b/src/aws_secret.cpp
+--- a/src/aws_secret.cpp
++++ b/src/aws_secret.cpp
+@@ -141,6 +141,29 @@ public:
+ 		}
+ 	}
+
++	//! Resolve a credentials provider from a profile's credential_source field
++	std::shared_ptr<Aws::Auth::AWSCredentialsProvider> ResolveCredentialSource(const Aws::Config::Profile &profile) {
++		auto credential_source = profile.GetCredentialSource();
++		if (credential_source == "Ec2InstanceMetadata" || credential_source == "EcsContainer") {
++			return std::make_shared<Aws::Auth::InstanceProfileCredentialsProvider>();
++		} else if (credential_source == "Environment") {
++			return std::make_shared<Aws::Auth::EnvironmentAWSCredentialsProvider>();
++		}
++		return nullptr;
++	}
++
++	//! Resolve source credentials for a profile that uses source_profile or credential_source
++	std::shared_ptr<Aws::Auth::AWSCredentialsProvider> ResolveSourceCredentials(const Aws::Config::Profile &profile) {
++		// credential_source on the profile itself (e.g. credential_source = Ec2InstanceMetadata)
++		auto direct_source = ResolveCredentialSource(profile);
++		if (direct_source) {
++			return direct_source;
++		}
++		// source_profile: resolve that profile's credentials (one level of recursion)
++		auto source_profile_name = profile.GetSourceProfile();
++		if (!source_profile_name.empty()) {
++			auto source_profile = GetProfile(source_profile_name, true);
++			// The source profile might use credential_source
++			auto source_creds = ResolveCredentialSource(source_profile);
++			if (source_creds) {
++				// If source profile also has a role_arn, chain through it
++				if (!source_profile.GetRoleArn().empty()) {
++					Aws::Client::ClientConfiguration clientConfig;
++					if (!SELECTED_CURL_CERT_PATH.empty()) {
++						clientConfig.caFile = SELECTED_CURL_CERT_PATH;
++					}
++					auto sts_client = std::make_shared<Aws::STS::STSClient>(source_creds, clientConfig);
++					auto source_role_arn = source_profile.GetRoleArn();
++					auto source_external_id = source_profile.GetExternalId();
++					return std::make_shared<Aws::Auth::STSAssumeRoleCredentialsProvider>(
++					    source_role_arn, Aws::String(), source_external_id,
++					    Aws::Auth::DEFAULT_CREDS_LOAD_FREQ_SECONDS, sts_client);
++				}
++				return source_creds;
++			}
++			// Fallback: source profile with static credentials
++			return std::make_shared<Aws::Auth::ProfileConfigFileAWSCredentialsProvider>(source_profile_name.c_str());
++		}
++		return nullptr;
++	}
++
+ 	void AddConfigProvider(const bool require_credentials, const string &profile_name, const string &assume_role_arn,
+ 	                       const string &external_id) {
+ 		auto profile = GetProfile(profile_name, require_credentials);
+@@ -171,7 +194,14 @@ public:
+ 		Aws::Client::ClientConfiguration clientConfig;
+ 		if (!SELECTED_CURL_CERT_PATH.empty()) {
+ 			clientConfig.caFile = SELECTED_CURL_CERT_PATH; // Set the CA file
+ 		}
+-		auto sts_client = std::make_shared<Aws::STS::STSClient>(clientConfig);
++		// Resolve source credentials for role chaining (source_profile / credential_source)
++		std::shared_ptr<Aws::STS::STSClient> sts_client;
++		auto source_creds = ResolveSourceCredentials(profile);
++		if (source_creds) {
++			sts_client = std::make_shared<Aws::STS::STSClient>(source_creds, clientConfig);
++		} else {
++			sts_client = std::make_shared<Aws::STS::STSClient>(clientConfig);
++		}
+ 		if (!external_id.empty()) {
+ 			AddProvider(std::make_shared<Aws::Auth::STSAssumeRoleCredentialsProvider>(
+ 			    assume_role_arn, Aws::String(), external_id, Aws::Auth::DEFAULT_CREDS_LOAD_FREQ_SECONDS, sts_client));

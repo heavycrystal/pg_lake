@@ -124,16 +124,33 @@ build_pg_extensions() {
     done
 }
 
-# ---------- step 6: build duckdb_pglake (no Azure) ----------
-build_duckdb() {
-    print_header "Building DuckDB (without Azure SDK)"
+# ---------- step 5.5: bootstrap vcpkg for aws-sdk-cpp ----------
+bootstrap_vcpkg() {
+    print_header "Bootstrapping vcpkg (for aws-sdk-cpp)"
     cd "${SCRIPT_DIR}"
 
-    # Build with ENABLE_AZURE=OFF, ENABLE_AWS_SDK=OFF, and no VCPKG_TOOLCHAIN_PATH.
-    # DuckDB's httpfs extension provides built-in S3 support with key-based auth.
-    # System OpenSSL and curl are found via cmake's find_package.
-    make duckdb_pglake ENABLE_AZURE=OFF ENABLE_AWS_SDK=OFF VCPKG_TOOLCHAIN_PATH=""
-    sudo make install-duckdb_pglake ENABLE_AZURE=OFF ENABLE_AWS_SDK=OFF VCPKG_TOOLCHAIN_PATH="" DUCKDB_BUILD_USE_CACHE=1
+    if [ ! -f /tmp/vcpkg/vcpkg ]; then
+        git clone --depth 1 --branch 2025.10.17 https://github.com/Microsoft/vcpkg.git /tmp/vcpkg
+        /tmp/vcpkg/bootstrap-vcpkg.sh
+    fi
+}
+
+# ---------- step 6: build duckdb_pglake (no Azure, with AWS SDK) ----------
+build_duckdb() {
+    print_header "Building DuckDB (without Azure, with AWS SDK)"
+    cd "${SCRIPT_DIR}"
+
+    make duckdb_pglake \
+        ENABLE_AZURE=OFF \
+        ENABLE_AWS_SDK=ON \
+        VCPKG_TOOLCHAIN_PATH=/tmp/vcpkg/scripts/buildsystems/vcpkg.cmake \
+        VCPKG_MANIFEST="$(pwd)/duckdb_pglake/vcpkg-no-azure"
+    sudo make install-duckdb_pglake \
+        ENABLE_AZURE=OFF \
+        ENABLE_AWS_SDK=ON \
+        VCPKG_TOOLCHAIN_PATH=/tmp/vcpkg/scripts/buildsystems/vcpkg.cmake \
+        VCPKG_MANIFEST="$(pwd)/duckdb_pglake/vcpkg-no-azure" \
+        DUCKDB_BUILD_USE_CACHE=1
 }
 
 # ---------- step 7: build pgduck_server (no Azure) ----------
@@ -142,7 +159,7 @@ build_pgduck_server() {
     cd "${SCRIPT_DIR}"
 
     # DUCKDB_BUILD_USE_CACHE=1 skips DuckDB rebuild (already installed above)
-    sudo make install-pgduck_server PG_LAKE_AZURE_SUPPORT=0 PG_LAKE_AWS_SDK_SUPPORT=0 PG_LAKE_SPATIAL_SUPPORT=0 DUCKDB_BUILD_USE_CACHE=1
+    sudo make install-pgduck_server PG_LAKE_AZURE_SUPPORT=0 PG_LAKE_SPATIAL_SUPPORT=0 DUCKDB_BUILD_USE_CACHE=1
 }
 
 # ---------- step 8: verify installation ----------
@@ -248,6 +265,7 @@ main() {
     init_submodules
     build_avro
     build_pg_extensions
+    bootstrap_vcpkg
     build_duckdb
     build_pgduck_server
     verify_install

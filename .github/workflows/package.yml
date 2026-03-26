@@ -40,10 +40,17 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Fetch DuckDB submodule tags
-        run: git -C duckdb_pglake/duckdb fetch --tags
+      - name: Cache DuckDB build
+        id: duckdb-cache
+        uses: actions/cache@v5
+        with:
+          path: duckdb_pglake/libduckdb.so
+          key: duckdb-aws-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('duckdb_pglake/Makefile', 'duckdb_pglake/extension_config.cmake', 'duckdb_pglake/CMakeLists.txt', 'duckdb_pglake/src/**', 'duckdb_pglake/vcpkg-no-azure/vcpkg.json', 'duckdb_pglake/patches/aws/**') }}
+          restore-keys: |
+            duckdb-aws-${{ runner.os }}-${{ runner.arch }}-
 
-      - name: Install PGDG repository
+      - name: Install build dependencies
+        if: '! (steps.duckdb-cache.outputs.cache-hit == ''true'' || hashFiles(''duckdb_pglake/libduckdb.so''))'
         run: |
           sudo apt-get install -y curl ca-certificates gnupg lsb-release
           curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | \
@@ -52,30 +59,30 @@ jobs:
             https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | \
             sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
-
-      - name: Install build dependencies
-        run: |
           sudo apt-get install -y \
             build-essential cmake ninja-build pkg-config \
             postgresql-server-dev-17 \
             libssl-dev libcurl4-openssl-dev libpq-dev
           echo "/usr/lib/postgresql/17/bin" >> $GITHUB_PATH
 
-      - name: Cache DuckDB build
-        uses: actions/cache@v5
-        with:
-          path: duckdb_pglake/libduckdb.so
-          key: duckdb-no-azure-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('duckdb_pglake/Makefile', 'duckdb_pglake/extension_config.cmake', 'duckdb_pglake/CMakeLists.txt', 'duckdb_pglake/src/**') }}
-          restore-keys: |
-            duckdb-no-azure-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Build DuckDB (no Azure, no AWS SDK)
+      - name: Bootstrap vcpkg
+        if: '! (steps.duckdb-cache.outputs.cache-hit == ''true'' || hashFiles(''duckdb_pglake/libduckdb.so''))'
         run: |
-          if [ -f duckdb_pglake/libduckdb.so ]; then
-            echo "Using cached libduckdb.so"
-          else
-            make duckdb_pglake ENABLE_AZURE=OFF ENABLE_AWS_SDK=OFF VCPKG_TOOLCHAIN_PATH=""
-          fi
+          git clone --depth 1 --branch 2025.10.17 https://github.com/Microsoft/vcpkg.git /tmp/vcpkg
+          /tmp/vcpkg/bootstrap-vcpkg.sh
+
+      - name: Fetch DuckDB submodule tags
+        if: '! (steps.duckdb-cache.outputs.cache-hit == ''true'' || hashFiles(''duckdb_pglake/libduckdb.so''))'
+        run: git -C duckdb_pglake/duckdb fetch --tags
+
+      - name: Build DuckDB (no Azure, with AWS SDK)
+        if: '! (steps.duckdb-cache.outputs.cache-hit == ''true'' || hashFiles(''duckdb_pglake/libduckdb.so''))'
+        run: >
+          make duckdb_pglake
+          ENABLE_AZURE=OFF
+          ENABLE_AWS_SDK=ON
+          VCPKG_TOOLCHAIN_PATH=/tmp/vcpkg/scripts/buildsystems/vcpkg.cmake
+          VCPKG_MANIFEST=$(pwd)/duckdb_pglake/vcpkg-no-azure
 
       - name: Upload libduckdb.so
         if: github.ref != 'refs/heads/main'
@@ -248,7 +255,7 @@ jobs:
           sudo make install-pg_lake
 
       - name: Build pgduck_server (no Azure, no AWS SDK)
-        run: sudo make install-pgduck_server PG_LAKE_AZURE_SUPPORT=0 PG_LAKE_AWS_SDK_SUPPORT=0 PG_LAKE_SPATIAL_SUPPORT=0 DUCKDB_BUILD_USE_CACHE=1
+        run: sudo make install-pgduck_server PG_LAKE_AZURE_SUPPORT=0 PG_LAKE_SPATIAL_SUPPORT=0 DUCKDB_BUILD_USE_CACHE=1
 
       - name: Build .deb package
         run: .github/build-deb.sh "${PG_VERSION}" "${{ matrix.deb_arch }}"

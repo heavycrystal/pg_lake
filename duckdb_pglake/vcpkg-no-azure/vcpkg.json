@@ -1,0 +1,16 @@
+{
+  "dependencies": [
+    {
+      "name": "aws-sdk-cpp",
+      "features": [ "sso", "sts", "identity-management" ]
+    },
+    "zlib",
+    "openssl",
+    "curl"
+  ],
+  "vcpkg-configuration": {
+    "overlay-ports": [
+      "./vcpkg_ports"
+    ]
+  }
+}

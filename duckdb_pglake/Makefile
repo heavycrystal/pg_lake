@@ -55,8 +55,9 @@ endif
 
 #### VCPKG config
 VCPKG_TOOLCHAIN_PATH?=
+VCPKG_MANIFEST?=${PROJ_DIR}
 ifneq ("${VCPKG_TOOLCHAIN_PATH}", "")
-	TOOLCHAIN_FLAGS:=${TOOLCHAIN_FLAGS} -DVCPKG_MANIFEST_DIR='${PROJ_DIR}' -DVCPKG_BUILD=1 -DCMAKE_TOOLCHAIN_FILE='${VCPKG_TOOLCHAIN_PATH}'
+	TOOLCHAIN_FLAGS:=${TOOLCHAIN_FLAGS} -DVCPKG_MANIFEST_DIR='${VCPKG_MANIFEST}' -DVCPKG_BUILD=1 -DCMAKE_TOOLCHAIN_FILE='${VCPKG_TOOLCHAIN_PATH}'
 endif
 
 #### Azure / AWS SDK config
@@ -133,8 +134,21 @@ debug: patch_duckdb
 release: patch_duckdb
 	mkdir -p build/release
 	cmake $(GENERATOR) $(BUILD_FLAGS) $(EXT_RELEASE_FLAGS) -DCMAKE_BUILD_TYPE=$(DEBUG_INFO_CONFIG_OPTION) -S $(DUCKDB_SRCDIR) -B build/release
+	$(MAKE) patch_fetched_extensions
 	cmake --build build/release -j $(NCORES)
 	cp build/release/src/$(LIB_NAME) .
+
+patch_fetched_extensions:
+	@for extdir in build/release/_deps/*_fc-src ; do \
+		extname=$$(basename $$extdir | sed 's/_extension_fc-src//') ; \
+		patchdir=patches/$$extname ; \
+		if [ -d "$$patchdir" ]; then \
+			for patch in $$patchdir/*.patch ; do \
+				echo "applying $$patch to $$extdir" ; \
+				(cd $$extdir && git apply --ignore-whitespace "$(PROJ_DIR)/$$patch") || true ; \
+			done ; \
+		fi ; \
+	done
 
 #### Misc
 
