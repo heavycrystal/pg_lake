@@ -6,8 +6,8 @@
  
 +	//! Resolve source credentials for role chaining via source_profile or credential_source
 +	std::shared_ptr<Aws::Auth::AWSCredentialsProvider> ResolveSourceCredentials(const Aws::Config::Profile &profile) {
-+		// Check credential_source on the profile itself
-+		auto credential_source = profile.GetCredentialSource();
++		// Check credential_source on the profile itself (accessed via GetValue since no dedicated getter)
++		auto credential_source = profile.GetValue("credential_source");
 +		if (!credential_source.empty()) {
 +			if (credential_source == "Ec2InstanceMetadata" || credential_source == "EcsContainer") {
 +				return std::make_shared<Aws::Auth::InstanceProfileCredentialsProvider>();
