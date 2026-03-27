@@ -1,55 +1,70 @@
---- a/src/aws_secret.cpp
-+++ b/src/aws_secret.cpp
-@@ -168,6 +168,42 @@
+--- a/src/aws_secret.cpp	2026-03-19 06:38:11.816953044 +0000
++++ b/src/aws_secret.cpp	2026-03-27 14:00:09.398100938 +0000
+@@ -168,6 +168,56 @@
  		}
  	}
  
-+	//! Resolve source credentials for role chaining via source_profile or credential_source
 +	std::shared_ptr<Aws::Auth::AWSCredentialsProvider> ResolveSourceCredentials(const Aws::Config::Profile &profile) {
-+		// Check credential_source on the profile itself (accessed via GetValue since no dedicated getter)
 +		auto credential_source = profile.GetValue("credential_source");
++		fprintf(stderr, "[pg_lake_aws] ResolveSourceCredentials: credential_source='%s'\n", credential_source.c_str());
 +		if (!credential_source.empty()) {
 +			if (credential_source == "Ec2InstanceMetadata" || credential_source == "EcsContainer") {
++				fprintf(stderr, "[pg_lake_aws] Using InstanceProfileCredentialsProvider\n");
 +				return std::make_shared<Aws::Auth::InstanceProfileCredentialsProvider>();
 +			} else if (credential_source == "Environment") {
++				fprintf(stderr, "[pg_lake_aws] Using EnvironmentAWSCredentialsProvider\n");
 +				return std::make_shared<Aws::Auth::EnvironmentAWSCredentialsProvider>();
 +			}
++			fprintf(stderr, "[pg_lake_aws] Unknown credential_source, returning nullptr\n");
 +			return nullptr;
 +		}
-+		// Check source_profile
 +		auto source_profile_name = profile.GetSourceProfile();
++		fprintf(stderr, "[pg_lake_aws] ResolveSourceCredentials: source_profile='%s'\n", source_profile_name.c_str());
 +		if (!source_profile_name.empty()) {
 +			auto source_profile = GetProfile(source_profile_name, true);
-+			auto source_creds = ResolveSourceCredentials(source_profile);
-+			if (source_creds && !source_profile.GetRoleArn().empty()) {
-+				// Source profile needs STS assume-role with its own resolved credentials
++			auto src_cred_source = source_profile.GetValue("credential_source");
++			fprintf(stderr, "[pg_lake_aws] source profile credential_source='%s', role_arn='%s'\n",
++			        src_cred_source.c_str(), source_profile.GetRoleArn().c_str());
++			std::shared_ptr<Aws::Auth::AWSCredentialsProvider> base_creds;
++			if (src_cred_source == "Ec2InstanceMetadata" || src_cred_source == "EcsContainer") {
++				base_creds = std::make_shared<Aws::Auth::InstanceProfileCredentialsProvider>();
++			} else if (src_cred_source == "Environment") {
++				base_creds = std::make_shared<Aws::Auth::EnvironmentAWSCredentialsProvider>();
++			} else {
++				fprintf(stderr, "[pg_lake_aws] source profile has no credential_source, using ProfileConfigFile\n");
++				base_creds = std::make_shared<Aws::Auth::ProfileConfigFileAWSCredentialsProvider>(source_profile_name.c_str());
++			}
++			if (!source_profile.GetRoleArn().empty() && base_creds) {
++				fprintf(stderr, "[pg_lake_aws] Creating STS client for source profile role assumption\n");
 +				Aws::Client::ClientConfiguration srcConfig;
 +				if (!SELECTED_CURL_CERT_PATH.empty()) {
 +					srcConfig.caFile = SELECTED_CURL_CERT_PATH;
 +				}
-+				auto src_sts = std::make_shared<Aws::STS::STSClient>(source_creds, srcConfig);
-+				return std::make_shared<Aws::Auth::STSAssumeRoleCredentialsProvider>(
++				auto src_sts = std::make_shared<Aws::STS::STSClient>(base_creds, srcConfig);
++				auto provider = std::make_shared<Aws::Auth::STSAssumeRoleCredentialsProvider>(
 +				    source_profile.GetRoleArn(), Aws::String(), source_profile.GetExternalId(),
 +				    Aws::Auth::DEFAULT_CREDS_LOAD_FREQ_SECONDS, src_sts);
++				auto test_creds = provider->GetAWSCredentials();
++				fprintf(stderr, "[pg_lake_aws] source profile creds empty=%d\n", test_creds.IsEmpty());
++				return provider;
 +			}
-+			if (source_creds) {
-+				return source_creds;
-+			}
-+			return std::make_shared<Aws::Auth::ProfileConfigFileAWSCredentialsProvider>(source_profile_name.c_str());
++			return base_creds;
 +		}
++		fprintf(stderr, "[pg_lake_aws] No source_profile or credential_source found\n");
 +		return nullptr;
 +	}
 +
  	void AddSTSProvider(const Aws::Config::Profile &profile) {
  		string assume_role_arn = profile.GetRoleArn();
  		string external_id = profile.GetExternalId();
-@@ -175,7 +211,14 @@
+@@ -175,7 +225,15 @@
  		if (!SELECTED_CURL_CERT_PATH.empty()) {
  			clientConfig.caFile = SELECTED_CURL_CERT_PATH; // Set the CA file
  		}
 -		auto sts_client = std::make_shared<Aws::STS::STSClient>(clientConfig);
-+		// Resolve source credentials for role chaining
++		fprintf(stderr, "[pg_lake_aws] AddSTSProvider: role_arn='%s'\n", assume_role_arn.c_str());
 +		auto source_creds = ResolveSourceCredentials(profile);
++		fprintf(stderr, "[pg_lake_aws] source_creds is %s\n", source_creds ? "set" : "null");
 +		std::shared_ptr<Aws::STS::STSClient> sts_client;
 +		if (source_creds) {
 +			sts_client = std::make_shared<Aws::STS::STSClient>(source_creds, clientConfig);
